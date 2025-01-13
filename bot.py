@@ -1,100 +1,130 @@
 import os
-from dotenv import load_dotenv
-from telegram import Update, Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-from fpdf import FPDF
+import logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler, filters, ContextTypes
 from PIL import Image
+from dotenv import load_dotenv
 
-# Загружаем переменные из .env
+# Загрузка переменных из .env
 load_dotenv()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Получаем токен
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Настройка логирования
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-# Папка для хранения файлов
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# Константы для этапов диалога
+PHOTOS, ASK_NAME, GENERATE_PDF = range(3)
 
-# Словарь для хранения данных пользователей
-user_data = {}
+# Папка для временных файлов
+TEMP_FOLDER = "temp"
 
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("Привет! Присылай фото, и я сделаю из них PDF!")
+if not os.path.exists(TEMP_FOLDER):
+    os.makedirs(TEMP_FOLDER)
 
-def handle_photo(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
+# Хранилище загруженных фотографий для каждого пользователя
+user_photos = {}
 
-    # Инициализация данных пользователя
-    if user_id not in user_data:
-        user_data[user_id] = {'photos': [], 'file_name': ''}
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Приветственное сообщение и начало работы"""
+    user_id = update.message.chat_id
+    logger.info(f"Пользователь {user_id} начал работу с ботом.")
+    await update.message.reply_text("Привет! Отправь мне фотографии, которые нужно объединить в PDF.")
+    user_photos[user_id] = []
+    return PHOTOS
 
-    # Сохранение фото
+async def receive_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка загруженных фотографий"""
+    user_id = update.message.chat_id
     photo = update.message.photo[-1]
-    file = context.bot.getFile(photo.file_id)
-    file_path = os.path.join(UPLOAD_FOLDER, f"{user_id}_{len(user_data[user_id]['photos'])}.jpg")
-    file.download(file_path)
-    user_data[user_id]['photos'].append(file_path)
+    file = await photo.get_file()
+    file_path = os.path.join(TEMP_FOLDER, f"{user_id}_{len(user_photos[user_id])}.jpg")
+    await file.download_to_drive(file_path)
 
-    update.message.reply_text("Фото сохранено! Теперь напиши, как хочешь назвать свой файл (без расширения).")
+    user_photos[user_id].append(file_path)
+    logger.info(f"Пользователь {user_id} загрузил фото: {file_path}")
 
-def set_filename(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
+    # Сообщение отправляется только один раз
+    if len(user_photos[user_id]) == 1:
+        await update.message.reply_text("Фото получено. Можешь отправить ещё или напиши /done, чтобы продолжить.")
+    return PHOTOS
 
-    # Если у пользователя нет фото, попросим загрузить фото
-    if user_id not in user_data or not user_data[user_id]['photos']:
-        update.message.reply_text("Загрузи фото, прежде чем задавать название.")
-        return
+async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрашивает имя для PDF"""
+    user_id = update.message.chat_id
+    if not user_photos[user_id]:
+        await update.message.reply_text("Ты не отправил ни одной фотографии. Начни сначала с /start.")
+        logger.warning(f"Пользователь {user_id} попытался завершить без загрузки фото.")
+        return ConversationHandler.END
 
-    # Сохраняем имя файла
-    user_data[user_id]['file_name'] = update.message.text
-    update.message.reply_text(f"Название файла установлено: {user_data[user_id]['file_name']}.\nЯ создаю PDF!")
+    logger.info(f"Пользователь {user_id} завершил загрузку фото. Переход к выбору имени PDF.")
+    await update.message.reply_text("Как назвать PDF?")
+    return ASK_NAME
 
-    # Создаем PDF
-    create_pdf(user_id, update, context)
+async def generate_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Генерирует PDF и отправляет пользователю"""
+    user_id = update.message.chat_id
+    pdf_name = update.message.text
+    pdf_path = os.path.join(TEMP_FOLDER, f"{pdf_name}.pdf")
+    images = []
 
-def create_pdf(user_id, update: Update, context: CallbackContext):
-    # Если имя файла не задано, используем имя по умолчанию
-    file_name = user_data[user_id]['file_name'] or "output"
-    photos = user_data[user_id]['photos']
+    logger.info(f"Пользователь {user_id} запросил создание PDF с именем '{pdf_name}'.")
 
-    # Создание PDF
-    pdf = FPDF()
-    for image_path in photos:
-        img = Image.open(image_path)
-        pdf.add_page()
-        pdf.image(image_path, x=10, y=10, w=190)  # Подгоняем под размер страницы
+    for file_path in user_photos[user_id]:
+        img = Image.open(file_path)
+        img = img.convert("RGB")
+        images.append(img)
 
-    # Сохранение PDF
-    pdf_path = os.path.join(UPLOAD_FOLDER, f"{file_name}.pdf")
-    pdf.output(pdf_path)
+    if images:
+        images[0].save(pdf_path, save_all=True, append_images=images[1:])
+        await update.message.reply_document(document=open(pdf_path, "rb"), filename=f"{pdf_name}.pdf")
+        logger.info(f"PDF '{pdf_name}' создан и отправлен пользователю {user_id}.")
 
-    # Отправка PDF пользователю
-    with open(pdf_path, "rb") as pdf_file:
-        context.bot.send_document(chat_id=update.message.chat_id, document=pdf_file)
+        # Удаление временных файлов
+        for file_path in user_photos[user_id]:
+            os.remove(file_path)
+        os.remove(pdf_path)
+        logger.info(f"Временные файлы для пользователя {user_id} удалены.")
 
-    # Удаление временных файлов
-    for photo in photos:
-        os.remove(photo)
-    os.remove(pdf_path)
-    
-    # Очистка данных пользователя
-    user_data[user_id] = {'photos': [], 'file_name': ''}
+    user_photos.pop(user_id, None)
+    await update.message.reply_text("PDF готов! Если хочешь создать ещё, напиши /start.")
+    return ConversationHandler.END
 
-    update.message.reply_text(f"PDF с названием '{file_name}.pdf' отправлен!")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отмена текущей операции"""
+    user_id = update.message.chat_id
+    user_photos.pop(user_id, None)
+    logger.info(f"Пользователь {user_id} отменил операцию.")
+    await update.message.reply_text("Операция отменена. Напиши /start, чтобы начать сначала.")
+    return ConversationHandler.END
 
 def main():
-    # Настройка бота
-    updater = Updater(TOKEN)
-    dp = updater.dispatcher
+    """Запуск бота"""
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("Токен Telegram бота не найден. Убедитесь, что файл .env содержит TELEGRAM_BOT_TOKEN.")
+        return
 
-    # Хендлеры
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.photo, handle_photo))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, set_filename))
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Запуск бота
-    updater.start_polling()
-    updater.idle()
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            PHOTOS: [
+                MessageHandler(filters.PHOTO, receive_photos),
+                CommandHandler("done", ask_name),
+            ],
+            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, generate_pdf)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    application.add_handler(conv_handler)
+
+    logger.info("Бот запущен и готов к работе.")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()

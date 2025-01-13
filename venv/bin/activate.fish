@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV /home/azamat/MyFiles/Python/photo2pdf/venv
+set -gx VIRTUAL_ENV /home/azamat/MyFiles/GitHub/Python/photo2pdf/venv
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/"bin $PATH
