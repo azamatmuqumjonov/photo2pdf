@@ -28,12 +28,18 @@ if not os.path.exists(TEMP_FOLDER):
 # Хранилище загруженных фотографий для каждого пользователя
 user_photos = {}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Приветственное сообщение и начало работы"""
+async def start_or_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Приветственное сообщение или продолжение работы"""
     user_id = update.message.chat_id
-    logger.info(f"Пользователь {user_id} начал работу с ботом.")
-    await update.message.reply_text("Привет! Отправь мне фотографии, которые нужно объединить в PDF.")
-    user_photos[user_id] = []
+    
+    if user_id not in user_photos:
+        user_photos[user_id] = []
+        await update.message.reply_text("Привет! Отправь мне фотографии, которые нужно объединить в PDF.")
+        logger.info(f"Пользователь {user_id} начал новую сессию.")
+    else:
+        await update.message.reply_text("Ты уже в процессе. Отправляй фото или напиши /done для завершения.")
+        logger.info(f"Пользователь {user_id} продолжает сессию.")
+
     return PHOTOS
 
 async def receive_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -47,7 +53,6 @@ async def receive_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_photos[user_id].append(file_path)
     logger.info(f"Пользователь {user_id} загрузил фото: {file_path}")
 
-    # Сообщение отправляется только один раз
     if len(user_photos[user_id]) == 1:
         await update.message.reply_text("Фото получено. Можешь отправить ещё или напиши /done, чтобы продолжить.")
     return PHOTOS
@@ -90,7 +95,7 @@ async def generate_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         logger.info(f"Временные файлы для пользователя {user_id} удалены.")
 
     user_photos.pop(user_id, None)
-    await update.message.reply_text("PDF готов! Если хочешь создать ещё, напиши /start.")
+    await update.message.reply_text("PDF готов! Если хочешь создать ещё, просто отправь новые фото.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -98,7 +103,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.message.chat_id
     user_photos.pop(user_id, None)
     logger.info(f"Пользователь {user_id} отменил операцию.")
-    await update.message.reply_text("Операция отменена. Напиши /start, чтобы начать сначала.")
+    await update.message.reply_text("Операция отменена. Отправь фото, чтобы начать сначала.")
     return ConversationHandler.END
 
 def main():
@@ -110,7 +115,7 @@ def main():
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[MessageHandler(filters.ALL & ~filters.COMMAND, start_or_resume)],
         states={
             PHOTOS: [
                 MessageHandler(filters.PHOTO, receive_photos),
